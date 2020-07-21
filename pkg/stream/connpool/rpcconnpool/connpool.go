@@ -50,7 +50,7 @@ func RegisterProtoConnPoolFactory(proto api.Protocol) {
 type connpool struct {
 	// sub protocol -> activeClients
 	// sub protocol of http is "", sub of http2 is ""
-	idleClients map[api.Protocol][]*activeClient
+	idleClients map[uint64][]*activeClient
 
 	host       atomic.Value
 	tlsHash       *types.HashValue
@@ -67,7 +67,7 @@ func NewConnPool(proto api.Protocol, host types.Host) types.ConnectionPool {
 	p := &connpool{
 		tlsHash: host.TLSHashValue(),
 		protocol:    proto,
-		idleClients: make(map[api.Protocol][]*activeClient),
+		idleClients: make(map[uint64][]*activeClient),
 	}
 
 	p.host.Store(host)
@@ -104,6 +104,7 @@ func (p *connpool) shouldMultiplex(subproto types.ProtocolName) bool {
 // CheckAndInit init the connection pool
 func (p *connpool) CheckAndInit(ctx context.Context) bool {
 	subProtocol := getSubProtocol(ctx)
+	id := getConnID(ctx)
 
 	// set the pool's multiplex mode
 	// p.shouldMultiplex(subProtocol)
@@ -118,11 +119,11 @@ func (p *connpool) CheckAndInit(ctx context.Context) bool {
 	// async connect only support multiplex mode !!!
 	p.clientMux.Lock()
 	{
-		if len(p.idleClients[subProtocol]) == 0 {
-			p.idleClients[subProtocol] = []*activeClient{{state: Init}} // fake client
+		if len(p.idleClients[id]) == 0 {
+			p.idleClients[id] = []*activeClient{{state: Init}} // fake client
 		}
 
-		clients := p.idleClients[subProtocol]
+		clients := p.idleClients[id]
 		lastIdx := len(clients) - 1
 		client = clients[lastIdx]
 	}
@@ -142,13 +143,13 @@ func (p *connpool) CheckAndInit(ctx context.Context) bool {
 
 			p.clientMux.Lock()
 			defer p.clientMux.Unlock()
-			lastIdx := len(p.idleClients[subProtocol]) - 1
+			lastIdx := len(p.idleClients[id]) - 1
 			client, _ := p.newActiveClient(context.Background(), subProtocol)
 			if client != nil {
 				client.state = Connected
-				p.idleClients[subProtocol][lastIdx] = client
+				p.idleClients[id][lastIdx] = client
 			} else {
-				delete(p.idleClients, subProtocol)
+				delete(p.idleClients, id)
 			}
 		}, nil)
 	}
@@ -203,15 +204,17 @@ func (p *connpool) GetActiveClient(ctx context.Context, subProtocol types.Protoc
 
 	p.clientMux.Lock()
 
-	if p.useAsyncConnect(p.protocol, subProtocol) && len(p.idleClients[subProtocol]) > 0 {
+	id := getConnID(ctx)
+
+	if p.useAsyncConnect(p.protocol, subProtocol) && len(p.idleClients[id]) > 0 {
 		defer p.clientMux.Unlock()
 
 		// the client was inited in the CheckAndInit function
-		lastIdx := len(p.idleClients[subProtocol]) - 1
-		return p.idleClients[subProtocol][lastIdx], ""
+		lastIdx := len(p.idleClients[id]) - 1
+		return p.idleClients[id][lastIdx], ""
 	}
 
-	n := len(p.idleClients[subProtocol])
+	n := len(p.idleClients[id])
 
 	// max conns is 0 means no limit
 	maxConns := host.ClusterInfo().ResourceManager().Connections().Max()
@@ -231,7 +234,7 @@ func (p *connpool) GetActiveClient(ctx context.Context, subProtocol types.Protoc
 
 					// HTTP/2 && xprotocol
 					// should put this conn to pool
-					p.idleClients[subProtocol] = append(p.idleClients[subProtocol], c)
+					p.idleClients[id] = append(p.idleClients[id], c)
 				}
 			} else {
 				// connection not multiplex,
@@ -259,11 +262,11 @@ func (p *connpool) GetActiveClient(ctx context.Context, subProtocol types.Protoc
 		var lastIdx = n - 1
 		if p.shouldMultiplex(subProtocol) {
 			var reason types.PoolFailureReason
-			c = p.idleClients[subProtocol][lastIdx]
+			c = p.idleClients[id][lastIdx]
 			if c == nil || atomic.LoadUint32(&c.goaway) == 1 {
 				c, reason = p.newActiveClient(ctx, subProtocol)
 				if reason == "" && c != nil {
-					p.idleClients[subProtocol][lastIdx] = c
+					p.idleClients[id][lastIdx] = c
 				}
 			}
 
@@ -278,9 +281,9 @@ func (p *connpool) GetActiveClient(ctx context.Context, subProtocol types.Protoc
 				goto RET
 			}
 
-			c = p.idleClients[subProtocol][lastIdx]
-			p.idleClients[subProtocol][lastIdx] = nil
-			p.idleClients[subProtocol] = p.idleClients[subProtocol][:lastIdx]
+			c = p.idleClients[id][lastIdx]
+			p.idleClients[id][lastIdx] = nil
+			p.idleClients[id] = p.idleClients[0][:lastIdx]
 
 			goto RET
 		}
@@ -337,7 +340,7 @@ func (p *connpool) putClientToPoolLocked(client *activeClient) {
 	}
 
 	if !client.closed {
-		p.idleClients[subProto] = append(p.idleClients[subProto], client)
+		p.idleClients[0] = append(p.idleClients[0], client)
 	}
 }
 
@@ -462,22 +465,21 @@ func (ac *activeClient) Close(err error) {
 // removeFromPool removes this client from connection pool
 func (ac *activeClient) removeFromPool() {
 	p := ac.pool
-	subProtocol := ac.subProtocol
 	p.clientMux.Lock()
 
 	defer p.clientMux.Unlock()
 	p.totalClientCount--
-	for idx, c := range p.idleClients[subProtocol] {
+	for idx, c := range p.idleClients[0] {
 		if c == ac {
 			// remove this element
-			lastIdx := len(p.idleClients[subProtocol]) - 1
+			lastIdx := len(p.idleClients[0]) - 1
 			// 	1. swap this with the last
-			p.idleClients[subProtocol][idx], p.idleClients[subProtocol][lastIdx] =
-				p.idleClients[subProtocol][lastIdx], p.idleClients[subProtocol][idx]
+			p.idleClients[0][idx], p.idleClients[0][lastIdx] =
+				p.idleClients[0][lastIdx], p.idleClients[0][idx]
 			// 	2. set last to nil
-			p.idleClients[subProtocol][lastIdx] = nil
+			p.idleClients[0][lastIdx] = nil
 			// 	3. remove the last
-			p.idleClients[subProtocol] = p.idleClients[subProtocol][:lastIdx]
+			p.idleClients[0] = p.idleClients[0][:lastIdx]
 		}
 	}
 	ac.closed = true
@@ -603,6 +605,17 @@ func getSubProtocol(ctx context.Context) types.ProtocolName {
 		}
 	}
 	return ""
+}
+
+func getConnID(ctx context.Context) uint64 {
+	if ctx != nil {
+		if val := mosnctx.Get(ctx, types.ContextKeyConnectionID); val != nil {
+			if code, ok := val.(uint64); ok {
+				return code
+			}
+		}
+	}
+	return 0
 }
 
 // ----------xprotocol only
