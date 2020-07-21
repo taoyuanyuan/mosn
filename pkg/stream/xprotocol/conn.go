@@ -21,7 +21,6 @@ import (
 	"context"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"mosn.io/api"
@@ -386,7 +385,8 @@ func (sc *streamConn) newClientStream(ctx context.Context) *xStream {
 		clientStream.id = 0
 	} else {
 		// multiplex needs a stream id
-		clientStream.id = atomic.AddUint64(&sc.clientStreamId, 1)
+		//clientStream.id = atomic.AddUint64(&sc.clientStreamId, 1)
+		clientStream.id = 0
 	}
 
 	clientStream.direction = stream.ClientStream
