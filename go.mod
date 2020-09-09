@@ -17,7 +17,6 @@ require (
 	github.com/gogo/protobuf v1.3.1
 	github.com/golang/protobuf v1.3.5
 	github.com/google/cel-go v0.5.1
-	github.com/hashicorp/go-plugin v1.0.1
 	github.com/json-iterator/go v1.1.9
 	github.com/juju/errors v0.0.0-20190930114154-d42613fe1ab9
 	github.com/juju/loggo v0.0.0-20190526231331-6e530bcce5d8 // indirect
