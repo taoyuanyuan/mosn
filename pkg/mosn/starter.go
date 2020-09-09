@@ -248,6 +248,10 @@ func (m *Mosn) beforeStart() {
 			server.ReconfigureHandler()
 		}, nil)
 	}
+
+	if network.EnvoyEnable {
+		network.EnvoyConnHandler = m.servers[0].Handler()
+	}
 }
 
 // Start mosn's server

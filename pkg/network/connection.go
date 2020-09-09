@@ -251,6 +251,10 @@ func (c *connection) attachEventLoop(lctx context.Context) {
 }
 
 func (c *connection) checkUseWriteLoop() bool {
+	if EnvoyEnable {
+		return false
+	}
+
 	var ip net.IP
 	switch c.network {
 	case "udp":

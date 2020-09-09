@@ -500,8 +500,10 @@ func (al *activeListener) OnNewConnection(ctx context.Context, conn api.Connecti
 		network.SetUDPProxyMap(network.GetProxyMapKey(conn.LocalAddr().String(), conn.RemoteAddr().String()), conn)
 	}
 
-	// start conn loops first
-	conn.Start(ctx)
+	if !network.EnvoyEnable {
+		// start conn loops first
+		conn.Start(ctx)
+	}
 }
 
 func (al *activeListener) activeStreamSize() int {
